@@ -1,5 +1,7 @@
 <div align="center">
 
+> **LIMSSR integration version:** This branch adds prompt-guided missing-prior reasoning to PriorRG report generation. Enable it with `--use_limssr`. See [integration and usage](LIMSSR_INTEGRATION.md) and [validation results](LIMSSR_VALIDATION.md). Offline CPU checks passed; full pretrained-model performance has not been evaluated.
+
 # 🩺 PriorRG: Prior-Guided Contrastive Pre-training and Coarse-to-Fine Decoding for Chest X-ray Report Generation
 
 [![AAAI 2026](https://img.shields.io/badge/AAAI-2026-red.svg)](https://ojs.aaai.org/index.php/AAAI/article/view/37657)

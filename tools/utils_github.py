@@ -1,4 +1,5 @@
 import argparse
+from models.limssr_bridge import add_limssr_arguments
 import datetime
 import random
 import os
@@ -108,8 +109,11 @@ def setup_arguments():
                        help='the name of version')
     parse.add_argument('--print_step', type=int, default=500, help='the frequency of print')
     # =============finish=====================#
+    add_limssr_arguments(parse)
     args = parse.parse_args()
     args = vars(args)
+    if args['use_limssr'] and args['task'] != 'report-generation-gpt2':
+        parse.error('--use_limssr is supported for report-generation-gpt2 only')
     now = datetime.datetime.now(tz.tzlocal())
     extension = now.strftime("%Y_%m_%d_%H")
     args['device'] = 'cuda' if torch.cuda.is_available() else 'cpu'
