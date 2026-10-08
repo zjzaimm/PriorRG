@@ -19,6 +19,7 @@ from transformers import GPT2TokenizerFast, AutoModel, AutoConfig, AutoImageProc
 
 from models.bert_model import TemporalFusion
 from models.perceiver_pytorch import Perceiver
+from models.lmrf import LMRF
 from tools.metrics.chexbert import RadGraphMetrics, F1CheXbertMetrics
 from tools.metrics.coco import COCOCaptionMetrics
 from tools.metrics.report_logger import ReportLogger
@@ -562,6 +563,7 @@ class TrainLanguageModel(pl.LightningModule):
         )
 
         self.text_decoder = self.build_text_decoder()
+        self.lmrf = LMRF(self.text_decoder.encoder_decoder.decoder.config.hidden_size)
 
     def build_text_encoder(self):
         enc_config = AutoConfig.from_pretrained(self.args['cxr_bert_path'], trust_remote_code=True)
@@ -811,6 +813,8 @@ class TrainLanguageModel(pl.LightningModule):
         joint_latents = self.perceiver(joint_feat, latent=spatio_temp_latents)
         # inject similar cases into joint_latents
         encoder_outputs = torch.cat([context_latents, spatio_temp_latents, joint_latents], dim=1)
+        encoder_outputs = self.lmrf(
+            encoder_outputs, self.text_decoder.encoder_decoder.decoder.transformer)
 
         encoder_outputs = transformers.modeling_outputs.BaseModelOutput(last_hidden_state=encoder_outputs)
 
@@ -1084,6 +1088,7 @@ class TrainLanguageModelOneSample(nn.Module):
         )
 
         self.text_decoder = self.build_text_decoder()
+        self.lmrf = LMRF(self.text_decoder.encoder_decoder.decoder.config.hidden_size)
 
     def build_text_encoder(self):
         enc_config = AutoConfig.from_pretrained(self.args['cxr_bert_path'], trust_remote_code=True)
@@ -1253,6 +1258,8 @@ class TrainLanguageModelOneSample(nn.Module):
         joint_latents = self.perceiver(joint_feat, latent=spatio_temp_latents)
         # inject similar cases into joint_latents
         encoder_outputs = torch.cat([context_latents, spatio_temp_latents, joint_latents], dim=1)
+        encoder_outputs = self.lmrf(
+            encoder_outputs, self.text_decoder.encoder_decoder.decoder.transformer)
 
         encoder_outputs = transformers.modeling_outputs.BaseModelOutput(last_hidden_state=encoder_outputs)
 
