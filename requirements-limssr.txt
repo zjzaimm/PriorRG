@@ -1,0 +1,14 @@
+# Core training/generation and smoke validation. Install torch separately for CPU/CUDA.
+# Clinical evaluation still uses the additional dependencies in requirements.txt.
+transformers==4.43.3
+peft==0.13.2
+accelerate==1.0.1
+pytorch_lightning==2.3.0
+torchmetrics==1.4.0.post0
+einops==0.8.1
+numpy==1.26.4
+pandas==2.3.3
+Pillow==12.0.0
+PyYAML==6.0.3
+nltk==3.8.1
+scikit-learn

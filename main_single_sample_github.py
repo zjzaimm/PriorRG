@@ -1,4 +1,5 @@
 import argparse
+from models.limssr_bridge import add_limssr_arguments
 import datetime
 import os
 import random
@@ -15,7 +16,6 @@ from transformers import GPT2TokenizerFast
 from pytorch_lightning import seed_everything
 
 # from tools.utils_github import setup_arguments, setup_seed
-from tools.metrics.metrics import compute_all_scores
 from models.model_github import TrainLanguageModelOneSample
 
 # os.environ['CUDA_VISIBLE_DEVICES'] = '0,1'
@@ -109,6 +109,7 @@ def setup_arguments():
                        help='the name of version')
     parse.add_argument('--print_step', type=int, default=500, help='the frequency of print')
     # =============finish=====================#
+    add_limssr_arguments(parse)
     args = parse.parse_args()
     args = vars(args)
     now = datetime.datetime.now(tz.tzlocal())
@@ -197,6 +198,12 @@ def build_arguments_model():
                    k in cur_model_state and v.shape == cur_model_state[k].shape}
     invalid_state = {k for k in pre_model_state.keys() if k not in valid_state}
     print(f"missing {invalid_state}")
+    if args.get('use_limssr', False):
+        missing_bridge = [key for key in cur_model_state
+                          if key.startswith('limssr_bridge.') and key not in valid_state]
+        if missing_bridge:
+            raise ValueError('LIMSSR inference needs a checkpoint fine-tuned with --use_limssr; '
+                             f'{len(missing_bridge)} bridge parameters are missing or incompatible')
     cur_model_state.update(valid_state)
     model.load_state_dict(cur_model_state)
 
@@ -293,6 +300,7 @@ def main():
 
     if reference_report is not None:
         aligned_reference_report = obtain_aligned_reference_reports(model.tokenizer, reference_report, args['max_length'])
+        from tools.metrics.metrics import compute_all_scores
         aligned_scores = compute_all_scores(generated_report, aligned_reference_report, args)
         print("aligned version performance: ", aligned_scores)
 
