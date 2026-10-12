@@ -68,13 +68,13 @@ def main():
         strategy = 'ddp_find_unused_parameters_true'
 
     trainer = pl.Trainer(
-        accelerator="gpu" if torch.cuda.is_available() else "cpu",
+        accelerator="gpu",
         accumulate_grad_batches=2,
         benchmark=False,
         callbacks=callbacks,
         check_val_every_n_epoch=check_val_every_n_epoch,
         strategy=strategy,
-        devices=args["num_gpus"] if torch.cuda.is_available() else 1,
+        devices=args["num_gpus"],
         deterministic=True,
         max_epochs=args['epochs'],
         logger=None,

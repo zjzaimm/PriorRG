@@ -19,7 +19,10 @@ from transformers import GPT2TokenizerFast, AutoModel, AutoConfig, AutoImageProc
 
 from models.bert_model import TemporalFusion
 from models.perceiver_pytorch import Perceiver
-from models.limssr_bridge import PriorRGLIMSSRBridge
+from models.limssr import LIMSSR
+from tools.metrics.chexbert import RadGraphMetrics, F1CheXbertMetrics
+from tools.metrics.coco import COCOCaptionMetrics
+from tools.metrics.report_logger import ReportLogger
 from tools.dataset_github import (AlignDataset, FinetuneDataset,
                                   AlignCollateFn, FinetuneCollateFn)
 
@@ -475,7 +478,35 @@ class TrainLanguageModel(pl.LightningModule):
         }
 
         self.train_loss_metric = torchmetrics.MeanMetric()
-        self._setup_report_metrics()
+        self.val_coco_metrics = COCOCaptionMetrics(metrics=["bleu", "cider", "rouge", "meteor"])
+        self.test_coco_metrics = COCOCaptionMetrics(metrics=["bleu", "cider", "rouge", "meteor"], save=False)
+
+        self.val_f1chexbert_metrics = F1CheXbertMetrics(
+            chexbert_path=args['chexbert_path'],
+            model_path=args['bert_path'],
+            mbatch_size=16,
+            exp_dir=args['project_name'],
+        )
+        self.test_f1chexbert_metrics = F1CheXbertMetrics(
+            chexbert_path=args['chexbert_path'],
+            model_path=args['bert_path'],
+            mbatch_size=16,
+            exp_dir=args['project_name'],
+        )
+        # Radgraph metrics:
+        self.val_radgraph_metrics = RadGraphMetrics(
+            radgraph_path=self.args['radgraph_path'],
+            mbatch_size=16,
+            exp_dir=args['project_name'],
+        )
+        self.test_radgraph_metrics = RadGraphMetrics(
+            radgraph_path=self.args['radgraph_path'],
+            mbatch_size=16,
+            exp_dir=args['project_name'],
+        )
+        # Report logging:
+        self.val_report_logger = ReportLogger(exp_dir=args['project_name'], split='val_reports')
+        self.test_report_logger = ReportLogger(exp_dir=args['project_name'], split='test_reports')
 
         # Image Encoder (frozen):
         self.image_processor = AutoImageProcessor.from_pretrained(args['rad_dino_path'])
@@ -532,46 +563,7 @@ class TrainLanguageModel(pl.LightningModule):
         )
 
         self.text_decoder = self.build_text_decoder()
-        self.limssr_bridge = PriorRGLIMSSRBridge(args) if args.get('use_limssr', False) else None
-        self.limssr_last_losses = {}
-        self.limssr_last_mask = None
-
-    def _setup_report_metrics(self):
-        # Evaluation-only packages/checkpoints are not needed for single-study generation.
-        from tools.metrics.chexbert import RadGraphMetrics, F1CheXbertMetrics
-        from tools.metrics.coco import COCOCaptionMetrics
-        from tools.metrics.report_logger import ReportLogger
-        args = self.args
-        self.val_coco_metrics = COCOCaptionMetrics(metrics=["bleu", "cider", "rouge", "meteor"])
-        self.test_coco_metrics = COCOCaptionMetrics(metrics=["bleu", "cider", "rouge", "meteor"], save=False)
-
-        self.val_f1chexbert_metrics = F1CheXbertMetrics(
-            chexbert_path=args['chexbert_path'],
-            model_path=args['bert_path'],
-            mbatch_size=16,
-            exp_dir=args['project_name'],
-        )
-        self.test_f1chexbert_metrics = F1CheXbertMetrics(
-            chexbert_path=args['chexbert_path'],
-            model_path=args['bert_path'],
-            mbatch_size=16,
-            exp_dir=args['project_name'],
-        )
-        # Radgraph metrics:
-        self.val_radgraph_metrics = RadGraphMetrics(
-            radgraph_path=self.args['radgraph_path'],
-            mbatch_size=16,
-            exp_dir=args['project_name'],
-        )
-        self.test_radgraph_metrics = RadGraphMetrics(
-            radgraph_path=self.args['radgraph_path'],
-            mbatch_size=16,
-            exp_dir=args['project_name'],
-        )
-        # Report logging:
-        self.val_report_logger = ReportLogger(exp_dir=args['project_name'], split='val_reports')
-        self.test_report_logger = ReportLogger(exp_dir=args['project_name'], split='test_reports')
-
+        self.limssr = LIMSSR(self.text_decoder.encoder_decoder.decoder.config.hidden_size)
 
     def build_text_encoder(self):
         enc_config = AutoConfig.from_pretrained(self.args['cxr_bert_path'], trust_remote_code=True)
@@ -686,22 +678,17 @@ class TrainLanguageModel(pl.LightningModule):
         """
         https://lightning.ai/docs/pytorch/stable/common/lightning_module.html#configure-optimizers
         """
-        ft_parameters, pt_parameters, limssr_parameters = [], [], []
+        ft_parameters, pt_parameters = [], []
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
-            if name.startswith('limssr_bridge.'):
-                limssr_parameters.append(param)
-            elif 'text_decoder' in name:
+            if 'text_decoder' in name:
                 ft_parameters.append(param)
             else:
                 pt_parameters.append(param)
-        parameter_groups = [{'params': pt_parameters, 'lr': self.args['pt_lr']},
-                            {'params': ft_parameters, 'lr': self.args['ft_lr']}]
-        if limssr_parameters:
-            parameter_groups.append({'params': limssr_parameters,
-                                     'lr': self.args.get('limssr_lr', 2e-4)})
-        optimiser = torch.optim.AdamW(parameter_groups)
+        optimiser = torch.optim.AdamW(
+            [{'params': pt_parameters, 'lr': self.args['pt_lr']},
+             {'params': ft_parameters, 'lr': self.args['ft_lr']}])
 
         lr_scheduler = ReduceLROnPlateau(optimiser, mode=self.args['monitor_mode'],
                                          factor=0.1, patience=self.args['patience'])
@@ -746,7 +733,7 @@ class TrainLanguageModel(pl.LightningModule):
             hidden_states = torch.stack(outputs['hidden_states'][1:], dim=1)  # the first token is [cls] token
         return hidden_states, last_hidden_state
 
-    def obtain_joint_visual_features_forward(self, current_study, prior_study=None, return_limssr_inputs=False):
+    def obtain_joint_visual_features_forward(self, current_study, prior_study=None, return_modalities=False):
         # obtain joint_visual features (joint visual features and spatio-temporal visual features)
         # ===================image encoder forward==============================
         hidden_states, last_hidden_state = self.image_encoder_forward(current_study['image'])
@@ -774,7 +761,7 @@ class TrainLanguageModel(pl.LightningModule):
 
         # fusion prior study using temporal_fusion network
         prior_mask = torch.zeros(cur_vis_feat.shape[0], device=cur_vis_feat.device, dtype=torch.bool)
-        prior_feat_full = None
+        prior_features = None
         spatio_temp_feat = torch.empty_like(cur_vis_feat).to(cur_vis_feat)
         if prior_study is not None:
             # fill the spatio_temp_feat using prior scan
@@ -790,8 +777,8 @@ class TrainLanguageModel(pl.LightningModule):
             # temporal image fusion
             has_pri_idx = prior_study['pri_idx']
             prior_mask[has_pri_idx] = True
-            prior_feat_full = torch.zeros_like(cur_vis_feat)
-            prior_feat_full[has_pri_idx] = pri_last_hidden_state
+            prior_features = torch.zeros_like(cur_vis_feat)
+            prior_features[has_pri_idx] = pri_last_hidden_state
             # temporal_fusion (the first and lasy sublayer have layer-norm)
             temp_visual_features = self.temporal_fusion(cur_vis_feat[has_pri_idx], pri_last_hidden_state)
             spatio_temp_feat[has_pri_idx] = temp_visual_features
@@ -801,9 +788,9 @@ class TrainLanguageModel(pl.LightningModule):
         else:
             no_pri_idx = list(range(cur_vis_feat.shape[0]))
         spatio_temp_feat[no_pri_idx] = self.layer_norm(cur_vis_feat[no_pri_idx])
-        if return_limssr_inputs:
+        if return_modalities:
             return fused_hidden_states, spatio_temp_feat, {
-                'current_image': cur_vis_feat, 'prior_image': prior_feat_full,
+                'current_image': cur_vis_feat, 'prior_image': prior_features,
                 'prior_mask': prior_mask,
             }
         return fused_hidden_states, spatio_temp_feat
@@ -824,9 +811,8 @@ class TrainLanguageModel(pl.LightningModule):
         """
         # =================== extract uni-modal features =======================
         # obtain joint visual features and spatio-temporal visual features
-        visual = self.obtain_joint_visual_features_forward(
-            current_study, prior_study, return_limssr_inputs=self.limssr_bridge is not None)
-        joint_feat, spatio_temp_feat = visual[:2]
+        joint_feat, spatio_temp_feat, modalities = self.obtain_joint_visual_features_forward(
+            current_study, prior_study, return_modalities=True)
         # obtain context information
         context_embed, context_mask = self.obtain_textual_features(
             context, spatio_temp_feat.device, return_attention_mask=True)
@@ -839,12 +825,9 @@ class TrainLanguageModel(pl.LightningModule):
         joint_latents = self.perceiver(joint_feat, latent=spatio_temp_latents)
         # inject similar cases into joint_latents
         encoder_outputs = torch.cat([context_latents, spatio_temp_latents, joint_latents], dim=1)
-        limssr_losses = {}
-        if self.limssr_bridge is not None:
-            encoder_outputs, limssr_losses, mask = self.limssr_bridge(
-                encoder_outputs, visual[2], context_embed, context, context_mask)
-            self.limssr_last_mask = mask.detach()
-        self.limssr_last_losses = {key: value.detach() for key, value in limssr_losses.items()}
+        encoder_outputs = self.limssr(
+            encoder_outputs, modalities, context_embed, context, context_mask,
+            self.text_decoder.encoder_decoder.decoder.transformer, self.tokenizer)
 
         encoder_outputs = transformers.modeling_outputs.BaseModelOutput(last_hidden_state=encoder_outputs)
 
@@ -860,7 +843,7 @@ class TrainLanguageModel(pl.LightningModule):
                 return_dict=True,
                 labels=labels_ids
             )
-            return outputs['loss'] + limssr_losses.get('total', 0.0)
+            return outputs['loss']
         else:
             outputs = self.generate(encoder_outputs)
             generated_reports = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
@@ -1118,9 +1101,7 @@ class TrainLanguageModelOneSample(nn.Module):
         )
 
         self.text_decoder = self.build_text_decoder()
-        self.limssr_bridge = PriorRGLIMSSRBridge(args) if args.get('use_limssr', False) else None
-        self.limssr_last_losses = {}
-        self.limssr_last_mask = None
+        self.limssr = LIMSSR(self.text_decoder.encoder_decoder.decoder.config.hidden_size)
 
     def build_text_encoder(self):
         enc_config = AutoConfig.from_pretrained(self.args['cxr_bert_path'], trust_remote_code=True)
@@ -1209,7 +1190,7 @@ class TrainLanguageModelOneSample(nn.Module):
             hidden_states = torch.stack(outputs['hidden_states'][1:], dim=1)  # the first token is [cls] token
         return hidden_states, last_hidden_state
 
-    def obtain_joint_visual_features_forward(self, current_study, prior_study=None, return_limssr_inputs=False):
+    def obtain_joint_visual_features_forward(self, current_study, prior_study=None, return_modalities=False):
         # obtain joint_visual features (joint visual features and spatio-temporal visual features)
         # ===================image encoder forward==============================
         hidden_states, last_hidden_state = self.image_encoder_forward(current_study['image'])
@@ -1237,7 +1218,7 @@ class TrainLanguageModelOneSample(nn.Module):
 
         # fusion prior study using temporal_fusion network
         prior_mask = torch.zeros(cur_vis_feat.shape[0], device=cur_vis_feat.device, dtype=torch.bool)
-        prior_feat_full = None
+        prior_features = None
         spatio_temp_feat = torch.empty_like(cur_vis_feat).to(cur_vis_feat)
         if prior_study is not None:
             # fill the spatio_temp_feat using prior scan
@@ -1253,8 +1234,8 @@ class TrainLanguageModelOneSample(nn.Module):
             # temporal image fusion
             has_pri_idx = prior_study['pri_idx']
             prior_mask[has_pri_idx] = True
-            prior_feat_full = torch.zeros_like(cur_vis_feat)
-            prior_feat_full[has_pri_idx] = pri_last_hidden_state
+            prior_features = torch.zeros_like(cur_vis_feat)
+            prior_features[has_pri_idx] = pri_last_hidden_state
             # temporal_fusion (the first and lasy sublayer have layer-norm)
             temp_visual_features = self.temporal_fusion(cur_vis_feat[has_pri_idx], pri_last_hidden_state)
             spatio_temp_feat[has_pri_idx] = temp_visual_features
@@ -1264,9 +1245,9 @@ class TrainLanguageModelOneSample(nn.Module):
         else:
             no_pri_idx = list(range(cur_vis_feat.shape[0]))
         spatio_temp_feat[no_pri_idx] = self.layer_norm(cur_vis_feat[no_pri_idx])
-        if return_limssr_inputs:
+        if return_modalities:
             return fused_hidden_states, spatio_temp_feat, {
-                'current_image': cur_vis_feat, 'prior_image': prior_feat_full,
+                'current_image': cur_vis_feat, 'prior_image': prior_features,
                 'prior_mask': prior_mask,
             }
         return fused_hidden_states, spatio_temp_feat
@@ -1288,10 +1269,8 @@ class TrainLanguageModelOneSample(nn.Module):
 
         # =================== extract uni-modal features =======================
         # obtain joint visual features and spatio-temporal visual features
-        visual = self.obtain_joint_visual_features_forward(
-            item['current_study'], item['prior_study'],
-            return_limssr_inputs=self.limssr_bridge is not None)
-        joint_feat, spatio_temp_feat = visual[:2]
+        joint_feat, spatio_temp_feat, modalities = self.obtain_joint_visual_features_forward(
+            item['current_study'], item['prior_study'], return_modalities=True)
         # obtain context information
         context_embed, context_mask = self.obtain_textual_features(
             item['clinical_context'], spatio_temp_feat.device, return_attention_mask=True)
@@ -1304,12 +1283,9 @@ class TrainLanguageModelOneSample(nn.Module):
         joint_latents = self.perceiver(joint_feat, latent=spatio_temp_latents)
         # inject similar cases into joint_latents
         encoder_outputs = torch.cat([context_latents, spatio_temp_latents, joint_latents], dim=1)
-        limssr_losses = {}
-        if self.limssr_bridge is not None:
-            encoder_outputs, limssr_losses, mask = self.limssr_bridge(
-                encoder_outputs, visual[2], context_embed, item['clinical_context'], context_mask)
-            self.limssr_last_mask = mask.detach()
-        self.limssr_last_losses = {key: value.detach() for key, value in limssr_losses.items()}
+        encoder_outputs = self.limssr(
+            encoder_outputs, modalities, context_embed, item['clinical_context'], context_mask,
+            self.text_decoder.encoder_decoder.decoder.transformer, self.tokenizer)
 
         encoder_outputs = transformers.modeling_outputs.BaseModelOutput(last_hidden_state=encoder_outputs)
 
