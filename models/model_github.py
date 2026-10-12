@@ -733,7 +733,7 @@ class TrainLanguageModel(pl.LightningModule):
             hidden_states = torch.stack(outputs['hidden_states'][1:], dim=1)  # the first token is [cls] token
         return hidden_states, last_hidden_state
 
-    def obtain_joint_visual_features_forward(self, current_study, prior_study=None, return_modalities=False):
+    def obtain_joint_visual_features_forward(self, current_study, prior_study=None):
         # obtain joint_visual features (joint visual features and spatio-temporal visual features)
         # ===================image encoder forward==============================
         hidden_states, last_hidden_state = self.image_encoder_forward(current_study['image'])
@@ -788,12 +788,10 @@ class TrainLanguageModel(pl.LightningModule):
         else:
             no_pri_idx = list(range(cur_vis_feat.shape[0]))
         spatio_temp_feat[no_pri_idx] = self.layer_norm(cur_vis_feat[no_pri_idx])
-        if return_modalities:
-            return fused_hidden_states, spatio_temp_feat, {
-                'current_image': cur_vis_feat, 'prior_image': prior_features,
-                'prior_mask': prior_mask,
-            }
-        return fused_hidden_states, spatio_temp_feat
+        return fused_hidden_states, spatio_temp_feat, {
+            'current_image': cur_vis_feat, 'prior_image': prior_features,
+            'prior_mask': prior_mask,
+        }
 
     def obtain_textual_features(self, reports, device, return_attention_mask=False):
         inputs = self.tokenization(reports, device=device, max_length=self.args['encoder_max_length'])
@@ -812,7 +810,7 @@ class TrainLanguageModel(pl.LightningModule):
         # =================== extract uni-modal features =======================
         # obtain joint visual features and spatio-temporal visual features
         joint_feat, spatio_temp_feat, modalities = self.obtain_joint_visual_features_forward(
-            current_study, prior_study, return_modalities=True)
+            current_study, prior_study)
         # obtain context information
         context_embed, context_mask = self.obtain_textual_features(
             context, spatio_temp_feat.device, return_attention_mask=True)
@@ -1190,7 +1188,7 @@ class TrainLanguageModelOneSample(nn.Module):
             hidden_states = torch.stack(outputs['hidden_states'][1:], dim=1)  # the first token is [cls] token
         return hidden_states, last_hidden_state
 
-    def obtain_joint_visual_features_forward(self, current_study, prior_study=None, return_modalities=False):
+    def obtain_joint_visual_features_forward(self, current_study, prior_study=None):
         # obtain joint_visual features (joint visual features and spatio-temporal visual features)
         # ===================image encoder forward==============================
         hidden_states, last_hidden_state = self.image_encoder_forward(current_study['image'])
@@ -1245,12 +1243,10 @@ class TrainLanguageModelOneSample(nn.Module):
         else:
             no_pri_idx = list(range(cur_vis_feat.shape[0]))
         spatio_temp_feat[no_pri_idx] = self.layer_norm(cur_vis_feat[no_pri_idx])
-        if return_modalities:
-            return fused_hidden_states, spatio_temp_feat, {
-                'current_image': cur_vis_feat, 'prior_image': prior_features,
-                'prior_mask': prior_mask,
-            }
-        return fused_hidden_states, spatio_temp_feat
+        return fused_hidden_states, spatio_temp_feat, {
+            'current_image': cur_vis_feat, 'prior_image': prior_features,
+            'prior_mask': prior_mask,
+        }
 
     def obtain_textual_features(self, reports, device, return_attention_mask=False):
         inputs = self.tokenization(reports, device=device, max_length=self.args['encoder_max_length'])
@@ -1270,7 +1266,7 @@ class TrainLanguageModelOneSample(nn.Module):
         # =================== extract uni-modal features =======================
         # obtain joint visual features and spatio-temporal visual features
         joint_feat, spatio_temp_feat, modalities = self.obtain_joint_visual_features_forward(
-            item['current_study'], item['prior_study'], return_modalities=True)
+            item['current_study'], item['prior_study'])
         # obtain context information
         context_embed, context_mask = self.obtain_textual_features(
             item['clinical_context'], spatio_temp_feat.device, return_attention_mask=True)
